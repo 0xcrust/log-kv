@@ -1,1 +1,0 @@
-A log-structured key-value database

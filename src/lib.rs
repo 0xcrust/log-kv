@@ -147,6 +147,7 @@ impl KvStore {
         for (_, op) in keep {
             nf.write_all(serde_json::to_string_pretty(&op)?.as_bytes())?;
         }
+        self.uncmp = 0;
         Ok(())
     }
 
