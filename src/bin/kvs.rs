@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use kvs2::{KvStore, Result};
+use kvs::{KvStore, Result};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();

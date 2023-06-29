@@ -1,13 +1,12 @@
 use assert_cmd::prelude::*;
 use kvs::{KvStore, Result};
-use kvs2 as kvs;
 use predicates::ord::eq;
 use predicates::str::{contains, is_empty, PredicateStrExt};
 use std::process::Command;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
-const CARGO_BIN_NAME: &str = "kvs2";
+const CARGO_BIN_NAME: &str = "kvs";
 
 // `kvs` with no args should exit with a non-zero code.
 #[test]
