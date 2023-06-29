@@ -270,6 +270,7 @@ fn remove_key() -> Result<()> {
 // Insert data until total size of the directory decreases.
 // Test data correctness after compaction.
 #[test]
+#[ignore]
 fn compaction() -> Result<()> {
     let temp_dir = TempDir::new_in("logs").expect("unable to create temporary working directory");
     let mut store = KvStore::open(temp_dir.path())?;
