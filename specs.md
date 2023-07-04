@@ -1,483 +1,486 @@
-# PNA Rust Project 2: Log-structured file I/O
+# PNA Rust Project 3: Synchronous client-server networking
 
-**Task**: Create a _persistent_ key/value store that _can be accessed from the
-command line_.
+**Task**: Create a _single-threaded_, persistent key/value store _server and client
+with synchronous networking over a custom protocol_.
 
 **Goals**:
 
-- Handle and report errors robustly
-- Use serde for serialization
-- Write data to disk as a log using standard file APIs
-- Read the state of the key/value store from disk
-- Map in-memory key-indexes to on-disk values
-- Periodically compact the log to remove stale data
+- Create a client-server application
+- Write a custom protocol with `std` networking APIs
+- Introduce logging to the server
+- Implement pluggable backends with traits
+- Benchmark the hand-written backend against `sled`
 
-**Topics**: log-structured file I/O, bitcask, the `failure` crate, `Read` /
-`Write` traits, the `serde` crate.
+**Topics**: `std::net`, logging, traits, benchmarking.
+
+<!-- TODO **Extensions**: shutdown on signal. -->
 
 - [Introduction](#user-content-introduction)
-- [Terminology](#user-content-terminology)
 - [Project spec](#user-content-project-spec)
 - [Project setup](#user-content-project-setup)
-- [Part 1: Error handling](#user-content-part-1-error-handling)
-- [Part 2: How the log behaves](#user-content-part-2-how-the-log-behaves)
-- [Part 3: Writing to the log](#user-content-part-3-writing-to-the-log)
-- [Part 4: Reading from the log](#user-content-part-4-reading-from-the-log)
-- [Part 5: Storing log pointers in the index](#user-content-part-5-storing-log-pointers-in-the-index)
-- [Part 6: Stateless vs. stateful `KvStore`](#user-content-part-6-stateless-vs-stateful-kvstore)
-- [Part 7: Compacting the log](#user-content-part-7-compacting-the-log)
-
+- [Part 1: Command line parsing](#user-content-part-1-command-line-parsing)
+- [Part 2: Logging](#user-content-part-2-logging)
+- [Part 3: Client-server networking setup](#user-content-part-3-client-server-networking-setup)
+- [Part 4: Implementing commands across the network](#user-content-part-4-implementing-commands-across-the-network)
+- [Part 5: Pluggable storage engines](#user-content-part-5-pluggable-storage-engines)
+- [Part 6: Benchmarking](#user-content-part-6-benchmarking)
 
 ## Introduction
 
-In this project you will create a simple on-disk key/value store that can be
-modified and queried from the command line. It will use a simplification of the
-storage algorithm used by [bitcask], chosen for its combination of simplicity
-and effectiveness. You will start by maintaining a _log_ (sometimes called a
-["write-ahead log"][wal] or "WAL") on disk of previous write commands that is
-evaluated on startup to re-create the state of the database in memory. Then you
-will extend that by storing only the keys in memory, along with offsets into the
-on-disk log. Finally, you will introduce log compaction so that it does not grow
-indefinitely. At the end of this project you will have built a simple, but
-well-architected database using Rust file APIs.
-
-[wal]: https://en.wikipedia.org/wiki/Write-ahead_logging
-[bitcask]: https://github.com/basho/bitcask
-
-
-<!--
-## Basic database architecture
-
-TODO
-
-- Basic description and terminology of log, memtable, blocks, etc
-- good opportunity for a diagram
-- find a good background reading
-- using the os page cache for caching
--->
-
-## Terminology
-
-Some terminology we will use in this course. It is the same as or inspired by
-[bitcask]. Different databases will have slightly different terminology.
-
-- _command_ - A request or the representation of a request made to the database.
-  These are issued on the command line or over the network. They have an
-  in-memory representation, a textual representation, and a machine-readable
-  serialized representation.
-- _log_ - An on-disk sequence of commands, in the order originally received and
-  executed. Our database's on-disk format is almost entirely made up of logs. It
-  will be simple, but also surprisingly efficient.
-- _log pointer_ - A file offset into the log. Sometimes we'll just call this a
-  "file offset".
-- _log compaction_ - As writes are issued to the database they sometimes
-  invalidate old log entries. For example, writing key/value `a = 0` then
-  writing `a = 1`, makes the first log entry for "a" useless. Compaction &mdash;
-  in our database at least &mdash; is the process of reducing the size of the
-  database by remove stale commands from the log.
-- _in-memory index_ (or _index_) - A map of keys to log pointers. When a read
-  request is issued, the in-memory index is searched for the appropriate log
-  pointer, and when it is found the value is retrieved from the on-disk log. In
-  our key/value store, like in bitcask, the index for the _entire database_ is
-  stored in memory.
-- _index file_ - The on-disk representation of the in-memory index. Without this
-  the log would need to be completely replayed to restore the state of the
-  in-memory index each time the database is started.
-
+In this project you will create a simple key/value server and client. They will
+communicate with a custom networking protocol of your design. You will emit logs
+using standard logging crates, and handle errors correctly across the network
+boundary. Once you have a working client-server architecture,
+then you will abstract the storage engine behind traits, and compare
+the performance of yours to the [`sled`] engine.
 
 ## Project spec
 
 The cargo project, `kvs`, builds a command-line key-value store client called
-`kvs`, which in turn calls into a library called `kvs`.
+`kvs-client`, and a key-value store server called `kvs-server`, both of which in
+turn call into a library called `kvs`. The client speaks to the server over
+a custom protocol.
 
-The `kvs` executable supports the following command line arguments:
+The `kvs-server` executable supports the following command line arguments:
 
-- `kvs set <KEY> <VALUE>`
+- `kvs-server [--addr IP-PORT] [--engine ENGINE-NAME]`
+
+  Start the server and begin listening for incoming connections. `--addr`
+  accepts an IP address, either v4 or v6, and a port number, with the format
+  `IP:PORT`. If `--addr` is not specified then listen on `127.0.0.1:4000`.
+
+  If `--engine` is specified, then `ENGINE-NAME` must be either "kvs", in which
+  case the built-in engine is used, or "sled", in which case sled is used. If
+  this is the first run (there is no data previously persisted) then the default
+  value is "kvs"; if there is previously persisted data then the default is the
+  engine already in use. If data was previously persisted with a different
+  engine than selected, print an error and exit with a non-zero exit code.
+
+  Print an error and return a non-zero exit code on failure to bind a socket, if
+  `ENGINE-NAME` is invalid, if `IP-PORT` does not parse as an address.
+
+- `kvs-server -V`
+
+  Print the version.
+
+The `kvs-client` executable supports the following command line arguments:
+
+- `kvs-client set <KEY> <VALUE> [--addr IP-PORT]`
 
   Set the value of a string key to a string.
-  Print an error and return a non-zero exit code on failure.
 
-- `kvs get <KEY>`
+  `--addr` accepts an IP address, either v4 or v6, and a port number, with the
+  format `IP:PORT`. If `--addr` is not specified then connect on
+  `127.0.0.1:4000`.
+
+  Print an error and return a non-zero exit code on server error,
+  or if `IP-PORT` does not parse as an address.
+
+- `kvs-client get <KEY> [--addr IP-PORT]`
 
   Get the string value of a given string key.
-  Print an error and return a non-zero exit code on failure.
 
-- `kvs rm <KEY>`
+  `--addr` accepts an IP address, either v4 or v6, and a port number, with the
+  format `IP:PORT`. If `--addr` is not specified then connect on
+  `127.0.0.1:4000`.
 
-  Remove a given key.
-  Print an error and return a non-zero exit code on failure.
+  Print an error and return a non-zero exit code on server error,
+  or if `IP-PORT` does not parse as an address.
 
-- `kvs -V`
+- `kvs-client rm <KEY> [--addr IP-PORT]`
 
-  Print the version
+  Remove a given string key.
 
-The `kvs` library contains a type, `KvStore`, that supports the following
-methods:
+  `--addr` accepts an IP address, either v4 or v6, and a port number, with the
+  format `IP:PORT`. If `--addr` is not specified then connect on
+  `127.0.0.1:4000`.
 
-- `KvStore::set(&mut self, key: String, value: String) -> Result<()>`
+  Print an error and return a non-zero exit code on server error,
+  or if `IP-PORT` does not parse as an address. A "key not found" is also
+  treated as an error in the "rm" command.
+
+- `kvs-client -V`
+
+  Print the version.
+
+All error messages should be printed to stderr.
+
+The `kvs` library contains four types:
+
+- `KvsClient` - implements the functionality required for `kvs-client` to speak
+  to `kvs-server`
+- `KvsServer` - implements the functionality to serve responses to `kvs-client`
+  from `kvs-server`
+- `KvsEngine` trait - defines the storage interface called by `KvsServer`
+- `KvStore` - implements by hand the `KvsEngine` trait
+- `SledKvsEngine` - implements `KvsEngine` for the [`sled`] storage engine.
+
+[`sled`]: https://github.com/spacejam/sled
+
+The design of `KvsClient` and `KvsServer` are up to you, and will be informed by
+the design of your network protocol. The test suite does not directly use either
+type, but only exercises them via the CLI.
+
+The `KvsEngine` trait supports the following methods:
+
+- `KvsEngine::set(&mut self, key: String, value: String) -> Result<()>`
 
   Set the value of a string key to a string.
+
   Return an error if the value is not written successfully.
 
-- `KvStore::get(&mut self, key: String) -> Result<Option<String>>`
+- `KvsEngine::get(&mut self, key: String) -> Result<Option<String>>`
 
   Get the string value of a string key.
   If the key does not exist, return `None`.
+
   Return an error if the value is not read successfully.
 
-- `KvStore::remove(&mut self, key: String) -> Result<()>`
+- `KvsEngine::remove(&mut self, key: String) -> Result<()>`
 
-  Remove a given key.
-  Return an error if the key does not exist or is not removed successfully.
+  Remove a given string key.
 
-- `KvStore::open(path: impl Into<PathBuf>) -> Result<KvStore>`
+  Return an error if the key does not exit or value is not read successfully.
 
-  Open the KvStore at a given path.
-  Return the KvStore.
+When setting a key to a value, `KvStore` writes the `set` command to disk in
+a sequential log. When removing a key, `KvStore` writes the `rm` command to
+the log. On startup, the commands in the log are re-evaluated and the
+log pointer (file offset) of the last command to set each key recorded in the
+in-memory index.
 
-When setting a key to a value, `kvs` writes the `set` command to disk in a
-sequential log, then stores the log pointer (file offset) of that command in the
-in-memory index from key to pointer. When removing a key, similarly, `kvs`
-writes the `rm` command in the log, then removes the key from the in-memory
-index.  When retrieving a value for a key with the `get` command, it searches
-the index, and if found then loads from the log the command at the corresponding
-log pointer, evaluates the command and returns the result.
+When retrieving a value for a key with the `get` command, it searches the index,
+and if found then loads from the log, and evaluates, the command at the
+corresponding log pointer.
 
-On startup, the commands in the log are traversed from oldest to newest, and the
-in-memory index rebuilt.
+When the size of the uncompacted log entries reach a given threshold, `KvStore`
+compacts it into a new log, removing redundant entries to reclaim disk space.
 
-When the size of the uncompacted log entries reach a given threshold, `kvs`
-compacts it into a new log, removing redundent entries to reclaim disk space.
-
-Note that our `kvs` project is both a stateless command-line program, and a
-library containing a stateful `KvStore` type: for CLI use the `KvStore` type
-will load the index, execute the command, then exit; for library use it will
-load the index, then execute multiple commands, maintaining the index state,
-until it is dropped.
 
 
 ## Project setup
 
 Continuing from your previous project, delete your previous `tests` directory and
-copy this project's `tests` directory into its place. Like the previous project,
-this project should contain a library and an executable, both named `kvs`.
+copy this project's `tests` directory into its place. This project should
+contain a library named `kvs`, and two executables, `kvs-server` and
+`kvs-client`. <!-- TODO explain how to reconcile the two bins with the existing
+code -->
 
 You need the following dev-dependencies in your `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-assert_cmd = "0.11.0"
+assert_cmd = "0.11"
+criterion = "0.3"
 predicates = "1.0.0"
+rand = "0.6.5"
 tempfile = "3.0.7"
 walkdir = "2.2.7"
 ```
 
-As with the previous project, go ahead and write enough empty or panicking
-definitions to make the test cases build.
-
-_Do that now._
+As with previous projects, add enough definitions that the test suite builds.
 
 
-## Part 1: Error handling
+## Part 1: Command line parsing
 
-In this project it will be possible for the code to fail due to I/O errors. So
-before we get started implementing a database we need to do one more thing that
-is crucial to Rust projects: decide on an error handling strategy.
+There's little new about the command line parsing in this project compared to
+previous projects. The `kvs-client` binary accepts the same command line
+arguments as in previous projects. And now `kvs-server` has its own set of
+command line arguments to handle, as described previously in the spec.
 
-<!-- TODO outline strategies? -->
-
-Rust's error handling is powerful, but involves a lot of boilerplate to use
-correctly. For this project the [`failure`] crate will provide the tools to
-easily handle errors of all kinds.
-
-[`failure`]: https://docs.rs/failure/0.1.5/failure/
-
-The [failure guide][fg] describes [several] error handling patterns.
-
-[fg]: https://boats.gitlab.io/failure/
-[several]: https://boats.gitlab.io/failure/guidance.html
-
-Pick one of those strategies and, in your library, either define your own error
-type or import `failure`s `Error`. This is the error type you will use in all of
-your `Result`s, converting error types from other crates to your own with the
-`?` operator.
-
-After that, define a type alias for `Result` that includes your concrete error
-type, so that you don't need to type `Result<T, YourErrorType>` everywhere, but
-can simply type `Result<T>`. This is a common Rust pattern.
-
-Finally, import those types into your executable with `use` statements, and
-change `main`s function signature to return `Result<()>`. All functions in your
-library that may fail will pass these `Results` back down the stack all the way
-to `main`, and then to the Rust runtime, which will print an error.
-
-Run `cargo check` to look for compiler errors, then fix them. For now it's
-ok to end `main` with `panic!()` to make the project build.
-
-_Set up your error handling strategy before continuing._
-
-As with the previous project, you'll want to create placeholder data structures
-and methods so that the tests compile. Now that you have defined an error type
-this should be straightforward. Add panics anywhere necessary to get the test
-suite to compile (`cargo test --no-run`).
+_Stub out the `kvs-server` command line handling._
 
 
-<!--
-## Aside: The history of Rust error handling
+## Part 2: Logging
+
+Production server applications tend to have robust and configurable logging. So
+now we're going to add logging to `kvs-server`, and as we continue will look
+for useful information to log. During development it is common to use logging
+at the `debug!` and `trace!` levels for "println debugging".
+
+There are two prominent logging systems in Rust: [`log`] and [`slog`]. Both
+export similar macros for logging at different levels, like `error!`, `info!`
+etc. Both are extensible, supporting different backends, for logging to the
+console, logging to file, logging to the system log, etc.
+
+[`log`]: https://docs.rs/log/
+[`slog`]: https://docs.rs/slog/
+
+The major difference is that `log` is fairly simple, logging only formatted
+strings; `slog` is feature-rich, and supports "structured logging", where log
+entries are typed and serialized in easily-parsed formats.
+
+`log` dates from the very earliest days of Rust, where it was part of the
+compiler, then part of the standard library, and finally released as its own
+crate. It is maintained by the Rust Project. `slog` is newer and maintained
+independently. Both are widely used.
+
+For both systems, one needs to select a "sink" crate, one that the logger
+sends logs to for display or storage.
+
+_Read about both of them, choose the one that appeals to you, add them as
+dependencies, then modify `kvs-server` to initialize logging on startup, prior
+to command-line parsing._ Set it up to output to stderr (sending the logs
+elsewhere additionally is fine, but they must go to stderr to pass the tests in
+this project).
+
+On startup log the server's version number. Also log the configuration. For now
+that means the IP address and port, and the name of the storage engine.
+
+
+## Part 3: Client-server networking setup
+
+Next we're going to set up the networking. For this project you are going to be
+using the basic TCP/IP networking APIs in `std::net`: [`TcpListener`] and
+[`TcpStream`].
+
+[`TcpListener`]: https://doc.rust-lang.org/std/net/struct.TcpListener.html
+[`TcpStream`]: https://doc.rust-lang.org/std/net/struct.TcpStream.html
+
+For this project, the server is synchronous and single-threaded. That means that
+you will listen on a socket, then accept connections, and execute and respond to
+commands one at a time. In the future we will re-visit this decision multiple
+times on our journey toward an asynchronous, multi-threaded, and
+high-performance database.
+
+Think about your manual testing workflow. Now that there are two executables to
+deal with, you'll need a way to run them both at the same time. If you are like
+many, you will use two terminals, running `cargo run --bin kvs-server` in
+one, where it runs until you press CTRL-D, and `cargo run --bin kvs-client`
+in the other.
+
+This is a good opportunity to use the logging macros for debugging. Go ahead and
+log information about every accepted connection.
+
+_Before thinking about the protocol, modify `kvs-server` to listen
+for and accept connections, and `kvs-client` to initiate connections._
+
+
+## Part 4: Implementing commands across the network
+
+In the last project you defined the commands your database accepts, and learned
+how to serialize and deserialize them to and from the log with `serde`.
+
+<!-- the above is to hint that they already have the two tools they need -->
+
+Now it's time to implement the key/value store over the network, remotely
+executing commands that until now have been implemented within a single process.
+As with the file I/O you worked on in the last project to create the log, you
+will be serializing and streaming commands with the `Read` and `Write` traits.
+
+You are going to design a network protocol. There are a number of ways to get
+data in and out of a TCP stream, and a number of decisions to make. Is it a
+text-based protocol, binary? How is the data translated from its format in
+memory to its format byte-stream format? Is there a single request per
+connection, or many?
+
+Keep in mind that it must support successful results and errors, and there are
+two kinds of errors now: the ones generated by your storage engine, as well as
+network errors.
+
+All the details of the protocol are up to you. The test suite does not care at
+all how the data gets from one end to the other, just that the results are
+correct.
+
+_Write your network protocol._
+
+
+<!-- ## Part 5: More error handling
+
+TODO write this section
+
+- handle error responses by converting errors to a serializable format
+- add context to errors
+- replace `fn main() -> Result` with custom error reporting
 -->
 
-_Note: Error-handling practices in Rust are still evolving. This course
-currently uses the [`failure`] crate to make defining error types easier. While
-`failure` has a good design, its use is [arguably not a best practice][nbp]. It
-may not continue to be viewed favorably by Rust experts. Future iterations
-of the course will likely not use `failure`. In the meantime, it is fine, and
-presents an opportunity to learn more of the history and nuance of Rust error
-handling._
 
-[nbp]: https://github.com/rust-lang-nursery/rust-cookbook/issues/502#issue-387418261
+## Part 5: Pluggable storage engines
 
-<!--
-Rust error handling has a long and winding history. Expert Rust programmers will
-be aware of it, as that history informs and explains modern Rust error handling.
+Your database has a storage engine, `KvStore`, implemented by you.
+Now you are going to add a second storage engine.
 
-TODO
--->
+There are multiple reasons to do so:
 
+- Different workloads require different performance characteristics. Some
+  storage engines may work better than other based on the workload.
 
-## Part 2: How the log behaves
+- It creates a familiar framework for comparing different backends.
 
-Now we are finally going to begin implementing the beginnings of a real database
-by reading and writing from disk. You will use [`serde`] to serialize the "set"
-and "rm" commands to a string, and the standard file I/O APIs to write it to
-disk.
+- It gives us an excuse to create and work with traits.
 
-[`serde`]: https://serde.rs/
+- It gives us an excuse to write some comparative benchmarks!
 
-This is the basic behavior of `kvs` with a log:
+So you are going to _extract_ a new trait, `KvsEngine`, from the `KvStore`
+interface. This is a classic _refactoring_, where existing code is transformed
+into a new form incrementally. When refactoring you will generally want to break
+the work up into the smallest changes that will continue to build and work.
 
-- "set"
-  - The user invokes `kvs set mykey myvalue`
-   - `kvs` creates a value representing the "set" command, containing its key and
-    value
-  - It then serializes that command to a `String`
-  - It then appends the serialized command to a file containing the log
-  - If that succeeds, it exits silently with error code 0
-  - If it fails, it exits by printing the error and returning a non-zero error code
-- "get"
-  - The user invokes `kvs get mykey`
-  - `kvs` reads the entire log, one command at a time, recording the 
-   affected key and file offset of the command to an in-memory _key -> log
-    pointer_ map
-  - It then checks the map for the log pointer
-  - If it fails, it prints "Key not found", and exits with exit code 0
-  - If it succeeds
-    - It deserializes the command to get the last recorded value of the key
-    - It prints the value to stdout and exits with exit code 0
-- "rm"
-  - The user invokes `kvs rm mykey`
-  - Same as the "get" command, `kvs` reads the entire log to build the in-memory
-    index
-  - It then checks the map if the given key exists
-  - If the key does not exist, it prints "Key not found", and exits with a
-    non-zero error code
-  - If it succeeds
-    - It creates a value representing the "rm" command, containing its key
-    - It then appends the serialized command to the log
-    - If that succeeds, it exits silently with error code 0
+Here is the API you need to end up with:
 
-The log is a record of the transactions committed to the database. By
-"replaying" the records in the log on startup we reconstruct the previous state
-of the database.
+- `trait KvsEngine` has `get`, `set` and `remove` methods with the same signatures
+  as `KvStore`.
 
-In this iteration you may store the value of the keys directly in memory (and
-thus never read from the log after initial startup and log replay). In a future
-iteration you will store only "log pointers" (file offsets) into the log.
+- `KvStore` implements `KvsEngine`, and no longer has `get`, `set` and `remove`
+  methods of its own.
+
+- There is a new implementation of `KvsEngine`, `SledKvsEngine`. You need to fill
+  its `get` and `set` methods using the `sled` library later.
+
+It's likely that you have already stubbed out the definitions for these if your
+tests are building. _Now is the time to fill them in._ Break down your
+refactoring into an intentional sequence of changes, and make sure the project
+continues to build and pass previously-passing tests before continuing.
+
+As one final step, you need to consider what happens when `kvs-server` is
+started with one engine, is killed, then restarted with a different engine. This
+case can only result in an error, and you need to figure out how to detect the
+case to report the error. The test `cli_wrong_engine` reflects this scenario.
 
 
-## Part 3: Writing to the log
+## Part 6: Benchmarking
 
-You will start by implementing the "set" flow. There are a number of steps here.
-Most of them are straightforward to implement and you can verify you've done so
-by running the appropriate `cli_*` test cases.
+As the course progresses we will increasingly concern ourselves with the
+performance of the database, exploring the impact of different architectures.
+You are encouraged to go beyond the model described herein and experiment with
+your own optimizations.
 
-`serde` is a large library, with many options, and supporting many serialization
-formats. Basic serialization and deserialization only requires annotating
-your data structure correctly, and calling a function to write it
-either to a `String` or a stream implementing `Write`.
+Performance work requires benchmarking, so now we're going to get started
+on that. There are many ways to benchmark databases, with standard test
+suites like [ycsb] and [sysbench]. In Rust benchmarking starts with
+the builtin tooling, so we will start there.
 
-You need to pick a serialization format. Think about the properties you want in
-your serialization format &mdash; do you want to prioritize performance? Do you
-want to be able to read the content of the log in plain text? It's your choice,
-but maybe you should include a comment in the code explaining it.
+[ycsb]: https://github.com/brianfrankcooper/YCSB
+[sysbench]: https://github.com/akopytov/sysbench
 
-Other things to consider include: where is the system performing buffering and
-where do you need buffering? What is the impact of buffering on subsequent
-reads? When should you open and close file handles? For each command? For the
-lifetime of the `KvStore`?
+Cargo supports benchmarking with `cargo bench`. The benchmarks may either be
+written using Rust's built in benchmark harness, or an external one.
 
-Some of the APIs you will call may fail, and return a `Result` of some error type.
-Make sure that your calling functions return a `Result` of _your own_ error type,
-and that you convert between the two with `?`.
+The built-in harness creates benchmarks from functions with the `#[bench]`
+attribute. It cannot be used on the Rust stable channel though, and is only
+documented briefly in [the unstable book][tb] and the [`test` crate docs][tc].
+It is though widely used throughout the Rust ecosystem &mdash; crates that use
+it, even if they compile with stable releases, do benchmarking with nightly
+releases.
 
-It is similar to implementing the "rm" command, but you should additionally
-check if the key exists before writing the command to the log. As we have two
-different commands that must be distinguished, you may use variants of a single
-enum type to represent each command. `serde` just works perfectly with enums.
+[tb]: https://doc.rust-lang.org/stable/unstable-book/library-features/test.html
+[tc]: https://doc.rust-lang.org/stable/test/index.html
 
-You may implement the "set" and "rm" commands now, focusing on the `set` / `rm`
-test cases, or you can proceed to the next section to read about the "get"
-command. It may help to keep both in mind, or to implement them both
-simultaneously. It is your choice.
+That system though is effectively deprecated &mdash; it is not being updated and
+will seemingly never be promoted to the stable release channel.
 
+There are better benchmark harnesses for Rust anyway. The one you will use is
+[criterion]. And you will use it to satisfy your curiosity about the
+performance of your `kvs` engine compared to the `sled` engine.
 
-## Part 4: Reading from the log
+These benchmarking tools work by defining a benchmarking function, and within
+that function iterating through a loop that performs the operation to be
+benchmarking. The benchmarking tool will iterate as many times as it needs to in
+order to know the duration of the operation with statistical significance.
 
-Now it's time to implement "get". In this part, you don't need to store
-log pointers in the index, we will leave the work to the next part. Instead,
-just read each command in the log on startup, executing them to save every key
-and value in the memory. Then read from the memory.
+See this basic example from the criterion guide:
 
-Should you read all records in the log into memory at once and then replay
-them into your map type; or should you read them one at a time while
-replaying them into your map? Should you read into a buffer before deserializing
-or deserialize from a file stream? Think about the memory usage of your approach.
-Think about the way reading from I/O streams interacts with the kernel.
+```rust
+fn criterion_benchmark(c: &mut Criterion) {
+    c.bench_function("fib 20", |b| {
+	    b.iter(|| {
+		    fibonacci(20)
+		});
+	});
+}
+```
 
-Remember that "get" may not find a value and that case has to be handled
-specially. Here, our API returns `None` and our command line client prints
-a particular message and exits with a zero exit code.
+The call to `bench_function` defines the benchmark, and the call to `iter`
+defines the code that is run for the benchmark. Code before and after the call
+to `iter` is not timed.
 
-There's one complication to reading the log, and you may have already considered
-it while writing the "set" code: how do you distinguish between each record in
-the log? That is, how do you know when to stop reading one record, and start
-reading the next? Do you even need to? Maybe serde will deserialize a record
-directly from an I/O stream and stop reading when it's done, leaving the
-file cursor in the correct place to read subsequent records. Maybe serde will
-report an error when it sees two records back-to-back. Maybe you need to insert
-additional information to distinguish the length of each record. Maybe not.
+[criterion]: https://docs.rs/criterion
 
-[`serde`]: https://serde.rs/
+Prepare for writing benchmarks by creating a file called `benches/benches.rs`.
+Like `tests/tests.rs`, cargo will automatically find this file and compile it as
+a benchmark.
 
-_Implement "get" now_.
+Start by writing the following benchmarks:
 
+- `kvs_write` - With the kvs engine, write 100 values with random keys of length
+  1-100000 bytes and random values of length 1-100000 bytes.
 
-## Part 5: Storing log pointers in the index
+- `sled_write`- With the sled engine, write 100 values with random keys of
+  length 1-100000 bytes and random values of length 1-100000 bytes.
 
-At this point most, if not all (besides the compaction test), other test suite should all pass. The changes
-introduced in the next steps are simple optimizations, necessary for fast
-performance and reduced storage. As you implement them, pay attention to what
-exactly they are optimizing for.
+- `kvs_read` - With the kvs engine, read 1000 values from previously written keys,
+  with keys and values of random length.
 
-As we've described, the database you are building maintains an in-memory index
-of all keys in the database. That index maps from string keys to log pointers,
-not the values themselves.
+- `sled_read` - With the sled engine, read 1000 values from previously written keys,
+  with keys and values of random length.
 
-This change introduces the need to perform reads from the log
-at arbitrary offsets. Consider how that might impact the way
-you manage file handles.
+(As an alternative to writing 4 benchmarks, you may also choose to write 2
+benchmarks parameterized over the engine, as [described in the criterion
+manual][pb]).
 
-_If, in the previous steps, you elected to store the string values directly in
-memory, now is the time to update your code to store log pointers instead,
-loading from disk on demand._
+[pb]: https://bheisler.github.io/criterion.rs/book/user_guide/benchmarking_with_inputs.html
 
+These are underspecified, and there's a fair bit of nuance to implementing them
+in a useful way. We need to consider at least three factors:
 
-## Part 6: Stateless vs. stateful `KvStore`
+- What code should be timed (and be written inside the benchmark loop), and what
+  code should not (and be written outside the benchmark loop)?
 
-Remember that our project is both a library and a command-line program.
-They have sligtly different requirements: the `kvs` CLI commits a single change
-to disk, then exits (it is stateless); the `KvStore` type commits
-changes to disk, then stays resident in memory to service future
-queries (it is stateful).
+- How to make the loop run identically for each iteration, despite using
+  "random" numbers.
 
-Is your `KvStore` stateful or stateless?
+- In the "read" benchmarks, how to read from the same set of "random" keys
+  that were written previously.
 
-_Make your `KvStore` retain the index in memory so it doesn't need to
-re-evaluate it for every call to `get`._
+These are all inter-related: some code needs to be carefully selected as
+un-timed setup code, and the seed values for random number generators need
+to be re-used appropriately.
 
+In all cases, operations that may return errors should assert (with `assert!`)
+that they did not return an error; and in the read case, "get" operations should
+assert that the key was found.
 
-## Part 7: Compacting the log
+Random numbers can be generated with the [`rand`] crate.
 
-At this point the database works just fine, but the log grows indefinitely. That
-is appropriate for some databases, but not the one we're building &mdash; we
-want to minimize disk usage as much as we can.
+[`rand`]: https://docs.rs/crate/rand/
 
-So the final step in creating your database is to compact the log. Consider
-that as the log grows that multiple entries may set the value of a given key.
-Consider also that only the most recent command that modified a given key has
-any effect on the current value of that key:
+Once you have your benchmarks, run them with `cargo bench`.
 
-| idx | command |
-|:---:|:--------|
-| 0 | ~Command::Set("key-1", "value-1a")~ |
-| 20 | Command::Set("key-2", "value-2") |
-| | ... |
-| 100 | Command::Set("key-1", "value-1b") |
+_Write the above benchmarks, and compare the results between `kvs` and `sled`._
 
-In this example obviously the command at index 0 is redundant, so it doesn't
-need to be stored. Log compaction then is about rebuilding the log to remove
-redundancy:
+_Note: please run the benchmarks on an otherwise unloaded machine. Benchmark
+results are very sensitive to the environment they are run in, and while the
+criterion library does its best to compensate for "noise", benchmarks are best
+done on a clean machine without other active processes. If you have a spare
+machine just for development, use that. If not, an AWS or other cloud instance
+may produce more consistent results than your local desktop._
 
-| idx | command |
-|:---:|:--------|
-| 0 | Command::Set("key-2", "value-2") |
-| | ... |
-| 99 | Command::Set("key-1", "value-1b") |
-
-Here's the basic algorithm you will use:
-
-<!-- TODO: Think about this. should the algorithm be specified? what _is_ a
-good heuristic to rebuild the log? always rebuild the entire log? -->
-
-_How_ you re-build the log is up to you. Consider questions like: what is the
-naive solution? How much memory do you need? What is the minimum amount of
-copying necessary to compact the log? Can the compaction be done in-place? How
-do you maintain data-integrity if compaction fails?
-
-So far we've been refering to "the log", but in actuallity it is common for a
-database to store many logs, in different files. You may find it easier to
-compact the log if you split your log across files.
-
-_Implement log compaction for your database._
-
-Congratulations! You have written a fully-functional database.
-
-If you are curious, now is a good time to start comparing the performance of
-your key/value store to others, like [sled], [bitcask], [badger], or [RocksDB].
-You might enjoy investigating their architectures, thinking about how theirs
-compare to yours, and how architecture affects performance. The next few
-projects will give you opportunities to optimize.
-
-[sled]: https://github.com/spacejam/sled
-[badger]: https://github.com/dgraph-io/badger
-[RocksDB]: https://rocksdb.org/
+<!-- TODO: criterion output example -->
 
 Nice coding, friend. Enjoy a nice break.
 
 
+<!-- TODO
+## Extension 1: Signal handling
+
+- Shutdown on KILL
+- TODO need to figure out how to interrupt the tcp listener
+-->
+
 <!--
 
-- Potential readings
-  - error handling https://github.com/rust-lang-nursery/rust-cookbook/issues/502#issue-387418261
+## Background reading ideas
+
+- log docs
+- slog docs
+- TCP/IP basics
+- refactoring overview
+- traits and impl trait
+- https://bheisler.github.io/post/benchmarking-with-criterion-rs/
+- general overview of benchmarking
+- conditional compilation of engines?
 
 ## TODOs
 
-- should flushing the log be part of the main project or an extension?
-- check terminology
-  - what's the correct term for the in-memory representation of the executed log?
-- is there a term for converting a log to it's permanent format?
-- custom main error handling
-- limits on k/v size?
-- maintaining data integrity on failure
-  - _must_ call flush at least
-- todo: `Result<Option<String>>` vs `Result<String>`
-  - is "not found" exit code 0 or !0?
-- error context
-- serialize directly to file stream
-- need readings for WAL
-- add code samples and digarams to illustrate the text and
-  be less monotonous
-- maintain the index file!
-- specify where data should be stored
-- caching the index
+- consider `Kvs_Engine_` trait vs `Kv_Store_` impl
 
 -->
