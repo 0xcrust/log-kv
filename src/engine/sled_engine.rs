@@ -13,9 +13,6 @@ impl SledEngine {
         let path = t.as_ref();
         path.to_path_buf().push(Self::LOG_LOCATION);
 
-        //let contents = std::fs::read_to_string(path.clone())?;
-        //println!("Sled. Contents: {:#?}", contents);
-
         let db = sled::open(path)?;
 
         Ok(SledEngine { db })

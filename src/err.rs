@@ -3,7 +3,7 @@
 /// A Result type generic over a [KvsError]
 pub type Result<T> = std::result::Result<T, KvsError>;
 
-/// Different variants of a KVS Error.
+/// Variants of a KVS Error.
 pub enum KvsError {
     Serde(Option<serde_json::Error>),
     Io(std::io::Error),

@@ -3,20 +3,12 @@ use kvs::KvsClient;
 use std::net::SocketAddr;
 
 fn main() -> anyhow::Result<()> {
-    //dotenv::dotenv()?;
     env_logger::init();
-    //println!("a");
-
-    //println!("version: {}", env!("CARGO_PKG_VERSION"));
 
     let cli = Cli::parse();
-    //println!("b");
 
     let socket_addr = cli.addr.parse::<SocketAddr>()?;
-    //println!("socket address: {:?}", socket_addr);
-    //println!("client connecting");
     let mut client = KvsClient::connect(socket_addr)?;
-    //println!("client connected");
 
     match cli.command {
         Command::Get { key } => match client.get(key)? {

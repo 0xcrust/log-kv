@@ -13,9 +13,7 @@ pub struct KvsClient {
 
 impl KvsClient {
     pub fn connect(server_addr: SocketAddr) -> Result<Self> {
-        //println!("tcp connect");
         let stream = TcpStream::connect(server_addr)?;
-        //println!("so it didn't even get here");
         Ok(KvsClient { stream })
     }
 
@@ -23,13 +21,13 @@ impl KvsClient {
         let writer = BufWriter::new(&self.stream);
 
         serde_json::to_writer(writer, &req)?;
-        //log::info!("Sent request: {:#?}", req);
+        log::debug!("Sent request: {:#?}", req);
 
         let mut buf = [0u8; 4096];
         let nbytes = self.stream.read(&mut buf)?;
         let response: NetResponse = serde_json::from_slice(&buf[..nbytes])?;
 
-        //log::info!("Got response: {:#?}", response);
+        log::debug!("Got response: {:#?}", response);
         if response.id != req.id {
             return Err("Invalid response".to_string().into());
         }

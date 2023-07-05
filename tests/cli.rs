@@ -221,7 +221,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .current_dir(&temp_dir)
         .spawn()
         .unwrap();
-    println!("aa");
     let handle = thread::spawn(move || {
         let _ = receiver.recv(); // wait for main thread to finish
         child.kill().expect("server exited before killed");
@@ -235,7 +234,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout(is_empty());
-    println!("b");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -244,7 +242,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout("value1\n");
-    println!("c");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -253,7 +250,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout(is_empty());
-    println!("d");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -262,7 +258,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout("value2\n");
-    println!("e");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -271,7 +266,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout(contains("Key not found"));
-    println!("f");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -280,7 +274,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .failure()
         .stderr(contains("Key not found"));
-    println!("g");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -289,7 +282,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout(is_empty());
-    println!("h");
 
     Command::cargo_bin("kvs-client")
         .unwrap()
@@ -298,7 +290,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout(is_empty());
-    println!("i");
 
     sender.send(()).unwrap();
     handle.join().unwrap();
@@ -313,7 +304,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .current_dir(&temp_dir)
         .spawn()
         .unwrap();
-    println!("j");
     let handle = thread::spawn(move || {
         let _ = receiver.recv(); // wait for main thread to finish
         child.kill().expect("server exited before killed");
@@ -327,7 +317,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .assert()
         .success()
         .stdout(contains("value3"));
-    println!("h");
     Command::cargo_bin("kvs-client")
         .unwrap()
         .args(&["get", "key1", "--addr", addr])
@@ -337,7 +326,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .stdout(contains("Key not found"));
     sender.send(()).unwrap();
     handle.join().unwrap();
-    println!("i");
 }
 
 #[test]

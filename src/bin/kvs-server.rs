@@ -5,7 +5,6 @@ use log::*;
 use std::net::SocketAddr;
 
 fn main() -> anyhow::Result<()> {
-    //dotenv::dotenv()?;
     env_logger::Builder::new().target(Target::Stderr).build();
     env_logger::init();
 
