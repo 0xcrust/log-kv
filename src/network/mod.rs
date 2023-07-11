@@ -1,5 +1,6 @@
 mod client;
 mod server;
+
 use crate::err::KvsError;
 use serde::{Deserialize, Serialize};
 
@@ -56,21 +57,23 @@ pub enum ServerError {
     Core(KvsError),
     Io(std::io::Error),
     Serde(serde_json::Error),
+    Crossbeam(anyhow::Error),
 }
 
 #[derive(Debug)]
 pub enum ClientError {
-    Error(String),
+    Any(String),
 }
 
 impl std::fmt::Debug for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ServerError::Io(e) => write!(f, "Network io error: {:?}", e),
+            ServerError::Io(e) => write!(f, "network io error: {:?}", e),
             ServerError::Serde(e) => {
-                write!(f, "Network serialization/deserialization error: {:?}", e)
+                write!(f, "network serialization/deserialization error: {:?}", e)
             }
-            ServerError::Core(e) => write!(f, "Core error: {:?}", e),
+            ServerError::Core(e) => write!(f, "core error: {:?}", e),
+            ServerError::Crossbeam(e) => write!(f, "crossbeam: {:?}", e),
         }
     }
 }
@@ -96,6 +99,11 @@ impl From<serde_json::Error> for ServerError {
         ServerError::Serde(e)
     }
 }
+impl From<anyhow::Error> for ServerError {
+    fn from(e: anyhow::Error) -> Self {
+        ServerError::Crossbeam(e)
+    }
+}
 
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -106,16 +114,16 @@ impl std::error::Error for ClientError {}
 
 impl From<String> for ClientError {
     fn from(s: String) -> ClientError {
-        ClientError::Error(s)
+        ClientError::Any(s)
     }
 }
 impl From<std::io::Error> for ClientError {
     fn from(s: std::io::Error) -> ClientError {
-        ClientError::Error(s.to_string())
+        ClientError::Any(s.to_string())
     }
 }
 impl From<serde_json::Error> for ClientError {
     fn from(s: serde_json::Error) -> ClientError {
-        ClientError::Error(s.to_string())
+        ClientError::Any(s.to_string())
     }
 }

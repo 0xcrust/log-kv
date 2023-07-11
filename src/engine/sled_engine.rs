@@ -2,6 +2,7 @@ use super::KvsEngine;
 use crate::err::KvsError;
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct SledEngine {
     db: sled::Db,
 }
@@ -20,7 +21,7 @@ impl SledEngine {
 }
 
 impl KvsEngine for SledEngine {
-    fn get(&mut self, key: String) -> crate::Result<Option<String>> {
+    fn get(&self, key: String) -> crate::Result<Option<String>> {
         let res = self
             .db
             .get(key)
@@ -31,7 +32,7 @@ impl KvsEngine for SledEngine {
         }
     }
 
-    fn remove(&mut self, key: String) -> crate::Result<()> {
+    fn remove(&self, key: String) -> crate::Result<()> {
         let old = self.db.remove(key)?;
         match old {
             Some(_) => {
@@ -42,7 +43,7 @@ impl KvsEngine for SledEngine {
         }
     }
 
-    fn set(&mut self, key: String, value: String) -> crate::Result<()> {
+    fn set(&self, key: String, value: String) -> crate::Result<()> {
         self.db
             .insert(key, value.as_bytes())
             .map(|_| ())

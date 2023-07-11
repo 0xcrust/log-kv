@@ -21,7 +21,7 @@ fn write(c: &mut Criterion) {
         ));
     }
 
-    let mut kvs = KvStore::open(&dir).unwrap();
+    let kvs = KvStore::open(&dir).unwrap();
     let mut kvs_group = c.benchmark_group("kvs write 100 values");
     for (id, (k, v)) in kv.iter().enumerate() {
         kvs_group.bench_with_input(BenchmarkId::from_parameter(id), &(k, v), |b, (k, v)| {
@@ -32,7 +32,7 @@ fn write(c: &mut Criterion) {
     }
     kvs_group.finish();
 
-    let mut sled = SledEngine::open(&dir).unwrap();
+    let sled = SledEngine::open(&dir).unwrap();
     let mut sled_group = c.benchmark_group("sled write 100 values");
     for (id, (k, v)) in kv.iter().enumerate() {
         sled_group.bench_with_input(BenchmarkId::from_parameter(id), &(k, v), |b, (k, v)| {
@@ -49,8 +49,8 @@ fn read(c: &mut Criterion) {
     let dir = TempDir::new().unwrap();
     let dir = dir.path();
 
-    let mut kvs = KvStore::open(&dir).unwrap();
-    let mut sled = SledEngine::open(&dir).unwrap();
+    let kvs = KvStore::open(&dir).unwrap();
+    let sled = SledEngine::open(&dir).unwrap();
 
     let mut rng = thread_rng();
     for _ in 0..1000 {

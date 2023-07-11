@@ -7,13 +7,13 @@ pub use sled_engine::SledEngine;
 use crate::err::Result;
 use serde::{Deserialize, Serialize};
 
-pub trait KvsEngine {
+pub trait KvsEngine: Clone + Send + 'static {
     /// Set a key-value pair.
-    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn set(&self, key: String, value: String) -> Result<()>;
     /// Get a value by its key.
-    fn get(&mut self, key: String) -> Result<Option<String>>;
+    fn get(&self, key: String) -> Result<Option<String>>;
     /// Remove a key-value pair by its key.
-    fn remove(&mut self, key: String) -> Result<()>;
+    fn remove(&self, key: String) -> Result<()>;
 }
 
 /// Serializable write operations on the Kvstore.

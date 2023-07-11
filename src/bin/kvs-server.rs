@@ -1,5 +1,6 @@
 use clap::Parser;
 use env_logger::Target;
+use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
 use kvs::{KvStore, KvsServer, SledEngine};
 use log::*;
 use std::net::SocketAddr;
@@ -44,15 +45,16 @@ fn main() -> anyhow::Result<()> {
     info!("loading {} engine", engine.to_str());
     std::fs::write(&engine_lock_path, engine.to_str())?;
 
+    let pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
     match engine {
         StorageEngine::Kvs => {
             let db = KvStore::open(cwd)?;
-            let server = KvsServer::bind(socket_addr, db)?;
+            let server = KvsServer::bind(socket_addr, db, pool)?;
             server.run()?;
         }
         StorageEngine::Sled => {
             let db = SledEngine::open(cwd)?;
-            let server = KvsServer::bind(socket_addr, db)?;
+            let server = KvsServer::bind(socket_addr, db, pool)?;
             server.run()?;
         }
     }
