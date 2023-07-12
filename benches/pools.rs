@@ -1,59 +1,54 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
 use kvs::{KvStore, KvsClient, KvsServer};
-use rand::{
-    distributions::{Alphanumeric, DistString},
-    prelude::*,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
-const KEY_LEN: usize = 20;
-const VALUE_LEN: usize = 20;
+const CONCURRENT_CLIENTS: usize = 20;
+const REQUESTS_PER_CLIENT: usize = 50;
 
 fn shared_queue_threadpool_writes(c: &mut Criterion) {
-    println!("is it even starting");
-    let server_address = "127.0.0.1:4006".parse::<std::net::SocketAddr>().unwrap();
     let cores = num_cpus::get();
     let inputs = (1..(2 * cores)).filter(|x| *x == 1 || x % 2 == 0);
-
-    let mut rng = thread_rng();
-    let common_value = Alphanumeric.sample_string(&mut rng, VALUE_LEN);
-    let key_values = (0..1000)
-        .map(|_| {
-            (
-                Alphanumeric.sample_string(&mut rng, KEY_LEN),
-                common_value.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
 
     let mut group = c.benchmark_group("shared_queue_writes");
 
     let temp = TempDir::new().unwrap();
-    let kvstore = KvStore::open(temp.path()).unwrap();
-    println!("got here. is inputs wrong??");
+    let path = temp.path();
+
+    let ipv4_addr = Ipv4Addr::new(127, 0, 0, 1);
+    let mut port = 4006;
+
     for num_threads in inputs {
-        //let temp = TempDir::new().unwrap();
-        //let kvstore = KvStore::open(temp.path()).unwrap();
+        let socket_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), port);
+        port += 1;
 
         let pool = SharedQueueThreadPool::new(num_threads as u32).unwrap();
-        let server = KvsServer::bind(server_address, kvstore.clone(), pool).unwrap();
-        let shutdown_handle = server.run().unwrap();
-        let client_thread_pool = SharedQueueThreadPool::new(1000).unwrap();
+        let store = KvStore::open(path).unwrap();
+        let (server, close_handle) = KvsServer::bind(socket_addr, store, pool).unwrap();
+        let server_thread = std::thread::spawn(|| {
+            server.run().unwrap();
+        });
+
+        let client_thread_pool = SharedQueueThreadPool::new(CONCURRENT_CLIENTS as u32).unwrap();
 
         let benchmark_id = format!("{num_threads} threads benchmark");
-        group.bench_with_input(benchmark_id, &key_values, |b, key_values| {
+        group.bench_function(benchmark_id, |b| {
             b.iter(|| {
-                println!("benching writes");
-                let barrier = Arc::new(Barrier::new(key_values.len()));
-                for (key, value) in key_values {
+                let barrier = Arc::new(Barrier::new(CONCURRENT_CLIENTS + 1));
+                for i in 0..CONCURRENT_CLIENTS {
                     let b = Arc::clone(&barrier);
-                    let (key, value) = (key.to_owned(), value.to_owned());
+                    let start = i * REQUESTS_PER_CLIENT;
+                    let end = start + REQUESTS_PER_CLIENT;
                     client_thread_pool.spawn(move || {
-                        let mut client = KvsClient::connect(server_address).unwrap();
-                        let result = client.set(key, value);
-                        assert!(result.is_ok());
+                        let mut client = KvsClient::connect(socket_addr).unwrap();
+                        for i in start..end {
+                            let key = format!("key{i:0>width$}", width = 5);
+                            let result = client.set(key.clone(), "x".to_string());
+                            assert!(result.is_ok());
+                        }
+                        client.shutdown().unwrap();
                         b.wait();
                     });
                 }
@@ -61,68 +56,74 @@ fn shared_queue_threadpool_writes(c: &mut Criterion) {
             })
         });
 
-        //shutdown_handle.shutdown();
+        close_handle.shutdown().unwrap();
+        server_thread.join().unwrap();
     }
     group.finish();
 }
 
 fn shared_queue_threadpool_reads(c: &mut Criterion) {
-    let server_address = "127.0.0.1:4007".parse::<std::net::SocketAddr>().unwrap();
     let cores = num_cpus::get();
     let inputs = (1..(2 * cores)).filter(|x| *x == 1 || x % 2 == 0);
 
-    let mut rng = thread_rng();
-    let common_value = Alphanumeric.sample_string(&mut rng, VALUE_LEN);
-    let key_values = (0..1000)
-        .map(|_| {
-            (
-                Alphanumeric.sample_string(&mut rng, KEY_LEN),
-                common_value.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-
     let mut group = c.benchmark_group("shared_queue_reads");
     let temp = TempDir::new().unwrap();
-    let thread_pool = SharedQueueThreadPool::new(200).unwrap();
-    let kvstore = KvStore::open(temp.path()).unwrap();
-    let server = KvsServer::bind(server_address, kvstore.clone(), thread_pool).unwrap();
-    let close_handle = server.run().unwrap();
+    let thread_pool: SharedQueueThreadPool = SharedQueueThreadPool::new(200).unwrap();
+    let path = temp.path();
+    let kvstore = KvStore::open(path.clone()).unwrap();
 
+    let ipv4_addr = Ipv4Addr::new(127, 0, 0, 1);
+    let mut port = 4006;
+    let server_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), port);
+    port += 1;
+
+    let (server, handle) = KvsServer::bind(server_addr, kvstore.clone(), thread_pool).unwrap();
+    let server_thread = std::thread::spawn(|| {
+        server.run().unwrap();
+    });
     let mut handles = vec![];
-    for (key, value) in key_values.clone() {
+    for i in 0..1000 {
         handles.push(std::thread::spawn(move || {
-            let mut client = KvsClient::connect(server_address).unwrap();
-            client.set(key.to_owned(), value.to_owned()).unwrap();
+            let key = format!("key{i:0>width$}", width = 5);
+            let mut client = KvsClient::connect(server_addr).unwrap();
+            client.set(key, "x".to_string()).unwrap();
         }));
     }
     for handle in handles {
         handle.join().unwrap();
     }
-    close_handle.shutdown();
+    handle.shutdown().unwrap();
+    server_thread.join().unwrap();
 
     for num_threads in inputs {
-        //let temp = TempDir::new().unwrap();
-        //let engine = KvStore::open(temp.path()).unwrap();
-        let thread_pool = SharedQueueThreadPool::new(num_threads as u32).unwrap();
-        let server = KvsServer::bind(server_address, kvstore.clone(), thread_pool).unwrap();
-        let shutdown_handle = server.run().unwrap();
+        let socket_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), port);
+        port += 1;
 
-        let client_thread_pool = SharedQueueThreadPool::new(1000).unwrap();
+        let store = kvstore.clone();
+        let thread_pool = SharedQueueThreadPool::new(num_threads as u32).unwrap();
+        let (server, close_handle) = KvsServer::bind(socket_addr, store, thread_pool).unwrap();
+        let server_thread = std::thread::spawn(|| {
+            server.run().unwrap();
+        });
+        let client_thread_pool = SharedQueueThreadPool::new(CONCURRENT_CLIENTS as u32).unwrap();
 
         let benchmark_id = format!("{num_threads} threads benchmark");
-        group.bench_with_input(benchmark_id, &key_values, |b, key_values| {
+        group.bench_function(benchmark_id, |b| {
             b.iter(|| {
-                println!("benching reads");
-                let barrier = Arc::new(Barrier::new(key_values.len()));
-                for (key, value) in key_values {
+                let barrier = Arc::new(Barrier::new(CONCURRENT_CLIENTS + 1));
+                for i in 0..CONCURRENT_CLIENTS {
                     let b = Arc::clone(&barrier);
-                    let (key, value) = (key.to_owned(), value.to_owned());
+                    let start = i * REQUESTS_PER_CLIENT;
+                    let end = start + REQUESTS_PER_CLIENT;
 
                     client_thread_pool.spawn(move || {
-                        let mut client = KvsClient::connect(server_address).unwrap();
-                        let result = client.get(key).unwrap().unwrap();
-                        assert!(result == value);
+                        let mut client = KvsClient::connect(socket_addr).unwrap();
+                        for i in start..end {
+                            let key = format!("key{i:0>width$}", width = 5);
+                            let result = client.set(key, "x".to_string());
+                            assert!(result.is_ok())
+                        }
+                        client.shutdown().unwrap();
                         b.wait();
                     });
                 }
@@ -130,7 +131,8 @@ fn shared_queue_threadpool_reads(c: &mut Criterion) {
             })
         });
 
-        //shutdown_handle.shutdown();
+        close_handle.shutdown().unwrap();
+        server_thread.join().unwrap();
     }
     group.finish();
 }

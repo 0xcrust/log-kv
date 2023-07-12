@@ -60,6 +60,11 @@ impl KvsClient {
             Response::Success(_) => Ok(()),
         }
     }
+
+    pub fn shutdown(self) -> Result<()> {
+        self.stream.shutdown(std::net::Shutdown::Both)?;
+        Ok(())
+    }
 }
 
 fn new_get_req(key: String) -> NetRequest {

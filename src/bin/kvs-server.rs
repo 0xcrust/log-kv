@@ -49,12 +49,12 @@ fn main() -> anyhow::Result<()> {
     match engine {
         StorageEngine::Kvs => {
             let db = KvStore::open(cwd)?;
-            let server = KvsServer::bind(socket_addr, db, pool)?;
+            let (server, _) = KvsServer::bind(socket_addr, db, pool)?;
             server.run()?;
         }
         StorageEngine::Sled => {
             let db = SledEngine::open(cwd)?;
-            let server = KvsServer::bind(socket_addr, db, pool)?;
+            let (server, _) = KvsServer::bind(socket_addr, db, pool)?;
             server.run()?;
         }
     }

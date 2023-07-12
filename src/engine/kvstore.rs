@@ -1,13 +1,14 @@
 //! An in-memory filestore.
 
-use serde_json::Deserializer;
-use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
-use std::io::prelude::*;
-use std::sync::{Arc, Mutex};
-
 use super::{KvsEngine, Op};
 use crate::err::KvsError;
+use serde_json::Deserializer;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::prelude::*,
+    sync::{Arc, Mutex},
+};
 
 /// The maximum redundant space(in bytes) before the log needs to be compacted.
 const REDUNDANT_SIZE_LIMIT: usize = 1024 * 1024;
@@ -32,6 +33,7 @@ pub struct KvStoreInner {
     redundant_size: usize,
 }
 
+#[derive(Copy, Clone)]
 struct Offset {
     start: usize,
     end: usize,
@@ -65,7 +67,6 @@ impl KvStore {
         let mut index = BTreeMap::new();
 
         let mut start = stream.byte_offset();
-        assert!(start == 0);
         let mut redundant_size = 0;
         while let Some(op) = stream.next() {
             let end = stream.byte_offset();
@@ -101,31 +102,40 @@ impl KvStore {
         let path = store.fp.to_owned();
         store.fh.rewind()?;
 
-        let stream = Deserializer::from_reader(&mut store.fh).into_iter::<Op>();
-        let mut keep = HashMap::new();
-        for op in stream {
-            let op = op?;
-            match op.clone() {
-                Op::Set { key, .. } => _ = keep.insert(key, op),
-                Op::Rm { key } => _ = keep.remove(&key),
-            }
+        let offsets = store
+            .index
+            .iter()
+            .map(|(s, o)| (s.to_owned(), o.to_owned()))
+            .collect::<Vec<_>>();
+        let mut keep = vec![];
+        for (key, offset) in offsets {
+            store
+                .fh
+                .seek(std::io::SeekFrom::Start(offset.start as u64))?;
+            let mut stream = Deserializer::from_reader(&mut store.fh).into_iter::<Op>();
+            let op = stream.next().ok_or(KvsError::Serde(None))??;
+            keep.push((key, op));
         }
-        drop(store);
 
+        let mut new_index = BTreeMap::new();
         let mut nfh = File::options()
             .truncate(true)
             .read(true)
             .write(true)
             .open(path)?;
 
-        for (_, op) in keep {
+        for (key, op) in keep {
+            let start = nfh.stream_position()?;
             nfh.write_all(serde_json::to_string(&op)?.as_bytes())?;
+            let end = nfh.stream_position()?;
+            let res = new_index.insert(key, new_offset(start as usize, end as usize));
+            assert!(res.is_none());
         }
-
-        let mut store = self.0.lock().unwrap();
 
         store.fh = nfh;
         store.redundant_size = 0;
+        store.index = new_index;
+
         drop(store);
 
         Ok(())
@@ -141,6 +151,7 @@ impl KvsEngine for KvStore {
         let op = Op::set(key.clone(), value);
 
         let mut store = self.0.lock().unwrap();
+        store.fh.seek(std::io::SeekFrom::End(0)).unwrap();
         let start = store.fh.stream_position()?;
         store.fh.write_all(serde_json::to_string(&op)?.as_bytes())?;
         let end = store.fh.stream_position()?;
@@ -166,6 +177,7 @@ impl KvsEngine for KvStore {
             Some(offset) => {
                 store.redundant_size += offset.len();
                 let op = Op::rm(key);
+                store.fh.seek(std::io::SeekFrom::End(0)).unwrap();
                 store.fh.write_all(serde_json::to_string(&op)?.as_bytes())?;
                 drop(store);
 
