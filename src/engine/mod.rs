@@ -1,7 +1,7 @@
-mod kvstore;
+mod kvs;
 mod sled_engine;
 
-pub use kvstore::KvStore;
+pub use kvs::KvStore;
 pub use sled_engine::SledEngine;
 
 use crate::err::Result;

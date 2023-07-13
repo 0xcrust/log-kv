@@ -6,7 +6,7 @@ use serde_json::Deserializer;
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::prelude::*,
+    io::{BufReader, BufWriter, prelude::*},
     sync::{Arc, Mutex},
 };
 
